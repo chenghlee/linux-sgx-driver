@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -eu
+
+abort() {
+    echo "[FATAL] ${1:-Unknown error}" >&2
+    exit 1
+}
+
+: ${INSTALL:="/usr/bin/install"}
+: ${DKMS:="/usr/sbin/dkms"}
+
+test -x "${INSTALL}" || abort "'install' command not found"
+test -x "${DKMS}" || abort "'dkms' command not found"
+
+cd "`dirname "${BASH_SOURCE[0]}"`/.."
+
+MOD_NAME="isgx"
+MOD_VER=`grep 'define DRV_VERSION' sgx_main.c | awk '{print $3;}' | tr -d '"'`
+MOD_DIR="/usr/src/${MOD_NAME}-${MOD_VER}"
+
+"${INSTALL}" -m 755 -d "${MOD_DIR}" "${MOD_DIR}/src"
+"${INSTALL}" -m 644 -t "${MOD_DIR}/src" License.txt Makefile *.{c,h}
+sed -i \
+    -e 's/KERNELRELEASE/PATCHLEVEL/g' \
+    -e '/depmod -A$/d' \
+    -e '/>> \/etc\/modules/d' \
+    "${MOD_DIR}/src/Makefile"
+
+cat >"${MOD_DIR}/dkms.conf" <<EOF
+MAKE="make -C src/ KERNELDIR=/lib/modules/\${kernelver}/build"
+CLEAN="make -C src/ clean"
+BUILT_MODULE_NAME=${MOD_NAME}
+BUILT_MODULE_LOCATION=src/
+PACKAGE_NAME=${MOD_NAME}
+PACKAGE_VERSION=${MOD_VER}
+DEST_MODULE_LOCATION=/kernel/drivers/intel/sgx
+REMAKE_INITRD=no
+AUTOINSTALL=yes
+EOF
+chmod 644 "${MOD_DIR}/dkms.conf"
+
+# Remove any previously installed versions
+IFS=$'\n'
+for installed in `${DKMS} status | grep "^${MOD_NAME}"`; do
+    # TODO: (possibly) ask for confirmation
+    installed_ver=`awk -F'[, ]+' '{print $2;}' <<<"$installed"`
+    "${DKMS}" remove "${MOD_NAME}/${installed_ver}" --all
+done
+
+"${DKMS}" add "${MOD_NAME}/${MOD_VER}"
+"${DKMS}" build --verbose "${MOD_NAME}/${MOD_VER}"
+"${DKMS}" install "${MOD_NAME}/${MOD_VER}"
